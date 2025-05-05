@@ -1,6 +1,6 @@
 import trino
 import logging
-from trino.auth import OAuth2Authentication
+from trino.auth import BasicAuthentication
 import urllib3
 import pandas as pd
 from typing import Optional, List, Any, Dict
@@ -25,9 +25,7 @@ class TrinoConnection:
                  schema: str = 'oltp_business_analytics',
                  connect_timeout: int = 60,
                  request_timeout: int = 60,
-                 max_attempts: int = 5,
-                 client_id: str = 'trino-client',
-                 redirect_port: int = 8080):
+                 max_attempts: int = 5):
         self.host = host
         self.port = port
         self.user = user
@@ -36,8 +34,6 @@ class TrinoConnection:
         self.connect_timeout = connect_timeout
         self.request_timeout = request_timeout
         self.max_attempts = max_attempts
-        self.client_id = client_id
-        self.redirect_port = redirect_port
         self.connection = None
         self._connect()
 
@@ -54,18 +50,10 @@ class TrinoConnection:
                     logger.info(f"Retrying connection in {backoff_time:.2f} seconds (attempt {attempt+1}/{self.max_attempts})")
                     time.sleep(backoff_time)
                 
-                # Configure OAuth2 authentication
-                base_url = f"https://{self.host}:{self.port}"
-                redirect_uri = f"http://localhost:{self.redirect_port}/oauth2/callback"
-                
-                # Configure OAuth2 with appropriate endpoints
-                auth = OAuth2Authentication(
-                    client_id=self.client_id,
-                    redirect_uri=redirect_uri,
-                    token_endpoint=urljoin(base_url, "/oauth2/token"),
-                    authorization_endpoint=urljoin(base_url, "/oauth2/authorize"),
-                    cache_token=True
-                )
+                # Use basic authentication instead of OAuth2
+                # This will use username/password authentication which is more reliable
+                # for deployment environments like Streamlit Cloud
+                auth = BasicAuthentication(self.user, "")
                 
                 # Set the HTTP headers for client info
                 http_headers = {
