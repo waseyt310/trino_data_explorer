@@ -5,6 +5,8 @@ import urllib3
 import pandas as pd
 from typing import Optional, List, Any, Dict
 from contextlib import contextmanager
+import time
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,33 +20,71 @@ class TrinoConnection:
                  port: int = 443,
                  user: str = 'waseyt.ibrahim',
                  catalog: str = 'oltp_business_analytics',
-                 schema: str = 'oltp_business_analytics'):
+                 schema: str = 'oltp_business_analytics',
+                 connect_timeout: int = 60,
+                 request_timeout: int = 60,
+                 max_attempts: int = 5):
         self.host = host
         self.port = port
         self.user = user
         self.catalog = catalog
         self.schema = schema
+        self.connect_timeout = connect_timeout
+        self.request_timeout = request_timeout
+        self.max_attempts = max_attempts
         self.connection = None
         self._connect()
 
     def _connect(self) -> None:
-        """Establish connection to Trino database"""
-        try:
-            auth = OAuth2Authentication()
-            self.connection = trino.dbapi.connect(
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                catalog=self.catalog,
-                schema=self.schema,
-                http_scheme='https',
-                verify=False,
-                auth=auth
-            )
-            logger.info(f"Successfully connected to Trino database (catalog: {self.catalog})")
-        except Exception as e:
-            logger.error(f"Failed to connect to Trino: {str(e)}")
-            raise
+        """Establish connection to Trino database with retry mechanism"""
+        attempt = 0
+        last_exception = None
+        
+        while attempt < self.max_attempts:
+            try:
+                # Exponential backoff with jitter
+                if attempt > 0:
+                    backoff_time = min(60, (2 ** attempt) + random.uniform(0, 1))
+                    logger.info(f"Retrying connection in {backoff_time:.2f} seconds (attempt {attempt+1}/{self.max_attempts})")
+                    time.sleep(backoff_time)
+                
+                auth = OAuth2Authentication()
+                self.connection = trino.dbapi.connect(
+                    host=self.host,
+                    port=self.port,
+                    user=self.user,
+                    catalog=self.catalog,
+                    schema=self.schema,
+                    http_scheme='https',
+                    verify=False,
+                    auth=auth,
+                    request_timeout=self.request_timeout,
+                    # Connection timeout setting
+                    http_headers={
+                        'X-Trino-Client-Info': 'Trino Data Explorer',
+                        'X-Trino-Client-Tags': 'streamlit-app'
+                    },
+                    client_options={
+                        'connect_timeout': self.connect_timeout
+                    }
+                )
+                logger.info(f"Successfully connected to Trino database (catalog: {self.catalog})")
+                return  # Connection successful, exit the retry loop
+            except urllib3.exceptions.ConnectTimeoutError as e:
+                last_exception = e
+                logger.warning(f"Connection attempt {attempt+1}/{self.max_attempts} timed out: {str(e)}")
+            except Exception as e:
+                last_exception = e
+                logger.warning(f"Connection attempt {attempt+1}/{self.max_attempts} failed: {str(e)}")
+            
+            attempt += 1
+        
+        # If we've exhausted all retries, raise the last exception
+        error_msg = f"Failed to connect to Trino after {self.max_attempts} attempts"
+        if last_exception:
+            error_msg += f": {str(last_exception)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
     @contextmanager
     def get_cursor(self):
@@ -61,29 +101,85 @@ class TrinoConnection:
                     logger.warning(f"Error closing cursor: {str(e)}")
 
     def test_connection(self) -> bool:
-        """Test the database connection"""
-        try:
-            with self.get_cursor() as cursor:
-                cursor.execute("SELECT 1")
-                result = cursor.fetchone()
-                return result[0] == 1
-        except Exception as e:
-            logger.error(f"Connection test failed: {str(e)}")
-            return False
+        """Test the database connection with retry mechanism"""
+        attempt = 0
+        while attempt < self.max_attempts:
+            try:
+                # Exponential backoff with jitter for retries
+                if attempt > 0:
+                    backoff_time = min(60, (2 ** attempt) + random.uniform(0, 1))
+                    logger.info(f"Retrying connection test in {backoff_time:.2f} seconds (attempt {attempt+1}/{self.max_attempts})")
+                    time.sleep(backoff_time)
+                
+                with self.get_cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    result = cursor.fetchone()
+                    if result and result[0] == 1:
+                        if attempt > 0:
+                            logger.info(f"Connection test succeeded after {attempt+1} attempts")
+                        return True
+            except Exception as e:
+                error_type = type(e).__name__
+                if "TimeoutError" in error_type or "ConnectTimeout" in error_type:
+                    logger.warning(f"Connection test attempt {attempt+1}/{self.max_attempts} timed out: {str(e)}")
+                else:
+                    logger.warning(f"Connection test attempt {attempt+1}/{self.max_attempts} failed: {str(e)}")
+            
+            attempt += 1
+        
+        logger.error(f"Connection test failed after {self.max_attempts} attempts")
+        return False
 
     def execute_query(self, query: str) -> pd.DataFrame:
-        """Execute a query and return results as a pandas DataFrame"""
-        try:
-            with self.get_cursor() as cursor:
-                cursor.execute(query)
-                results = cursor.fetchall()
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    return pd.DataFrame(results, columns=columns)
-                return pd.DataFrame(results)
-        except Exception as e:
-            logger.error(f"Query execution failed: {str(e)}")
-            raise
+        """Execute a query and return results as a pandas DataFrame with retry mechanism"""
+        attempt = 0
+        last_exception = None
+        
+        while attempt < self.max_attempts:
+            try:
+                # Exponential backoff with jitter for retries
+                if attempt > 0:
+                    backoff_time = min(60, (2 ** attempt) + random.uniform(0, 1))
+                    logger.info(f"Retrying query in {backoff_time:.2f} seconds (attempt {attempt+1}/{self.max_attempts})")
+                    time.sleep(backoff_time)
+                
+                with self.get_cursor() as cursor:
+                    cursor.execute(query)
+                    results = cursor.fetchall()
+                    if cursor.description:
+                        columns = [desc[0] for desc in cursor.description]
+                        return pd.DataFrame(results, columns=columns)
+                    return pd.DataFrame(results)
+            except urllib3.exceptions.TimeoutError as e:
+                last_exception = e
+                logger.warning(f"Query execution attempt {attempt+1}/{self.max_attempts} timed out: {str(e)}")
+            except Exception as e:
+                last_exception = e
+                # Check if this is a connection error that we should retry
+                error_str = str(e).lower()
+                if "timeout" in error_str or "connection" in error_str:
+                    logger.warning(f"Query execution attempt {attempt+1}/{self.max_attempts} failed with connection error: {str(e)}")
+                else:
+                    # For other errors, don't retry
+                    logger.error(f"Query execution failed: {str(e)}")
+                    raise
+            
+            attempt += 1
+            
+            # If connection was lost, try to reconnect before next attempt
+            if self.connection is None or not self.test_connection():
+                logger.info("Reconnecting to Trino before retry")
+                try:
+                    self._connect()
+                except Exception as connect_err:
+                    logger.error(f"Failed to reconnect: {str(connect_err)}")
+        
+        # If we've exhausted all retries
+        error_msg = f"Query execution failed after {self.max_attempts} attempts"
+        if last_exception:
+            error_msg += f": {str(last_exception)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
     def get_tables(self, schema: Optional[str] = None) -> List[str]:
         """Get list of tables in the specified schema"""
